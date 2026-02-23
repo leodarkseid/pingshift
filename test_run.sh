@@ -268,6 +268,52 @@ test_escaped_colon_parsing() {
 run_test "Parse Network Names with Colons (Handles escaped delimiters)" 0 "test_escaped_colon_parsing"
 
 
+test_failover_fallback() {
+    # 1. Setup mock environment
+    # Mock `ip route get` to return failure (empty output)
+    create_mock "ip" "exit 1"
+    create_mock "notify-send" "exit 0"
+    create_mock "paplay" "exit 0"
+    create_mock "ping" "exit 1"
+
+    # Mock nmcli: 
+    # Current UUID should be fetched via the fallback type-based grep instead of DEVICE.
+    create_mock "nmcli" '
+        arg_str="$*"
+        if [[ "$arg_str" == *"--active"* ]]; then
+            # The script will run: nmcli -g UUID,TYPE connection show --active | grep -E ":(802-11-wireless|802-3-ethernet)$"
+            echo "uuid-fallback-1234:802-11-wireless"
+            exit 0
+        elif [[ "$arg_str" == *"device wifi list"* ]]; then
+            echo "BackupNet"
+            exit 0
+        elif [[ "$arg_str" == *"802-11-wireless.ssid"* ]]; then
+            echo "BackupNet"
+            exit 0
+        elif [[ "$arg_str" == *"show"* && "$arg_str" != *"--active"* ]]; then
+            echo "uuid-fallback-1234:802-11-wireless:BadCurrentNet"
+            echo "uuid-backup-5678:802-11-wireless:BackupNet"
+            exit 0
+        elif [[ "$arg_str" == *"up uuid"* ]]; then
+            echo "SUCCESSFULLY_SWITCHED_VIA_FALLBACK"
+            exit 0
+        fi
+        exit 1
+    '
+
+    # Run the failover chunk
+    output=$(bash -c "export PATH=\"$MOCK_BIN_DIR:\$PATH\"; source \"$RUN_SCRIPT\"; run_failover_protocol" 2>&1)
+    
+    if echo "$output" | grep -q "Attempting to switch to alternative network: BackupNet"; then
+        return 0
+    else
+        echo "Fail: Script did not correctly use the fallback interface detection logic. Output: $output"
+        return 1
+    fi
+}
+run_test "Failover (Fallback active interface detection logic)" 0 "test_failover_fallback"
+
+
 test_loop_reset() {
     # 3. Test loop counter logic reset
     # Start loop count high to simulate the script has been running for days
@@ -327,7 +373,7 @@ EOF
     output=$(bash -c "
         source \"$RUN_SCRIPT\"
         CONFIG_FILE=\"$SCRIPT_DIR/monitor_test.conf\"
-        parse_config >/dev/null 2>&1
+        parse_config --interval 30 --interval fast --latency 250 --latency slow --heavy-loops 5 --heavy-loops invalid >/dev/null 2>&1
         
         # Output results for the test to grep
         echo \"VALID_VAR=\$VALID_VAR\"
@@ -335,6 +381,9 @@ EOF
         echo \"MY_ARRAY_1=\${MY_ARRAY[1]}\"
         echo \"VAR_WITH_COMMENT=\$VAR_WITH_COMMENT\"
         echo \"MALICIOUS_VAR=\$MALICIOUS_VAR\"
+        echo \"CHECK_INTERVAL=\$CHECK_INTERVAL\"
+        echo \"MAX_LATENCY=\$MAX_LATENCY\"
+        echo \"HEAVY_CHECK_MULTIPLIER=\$HEAVY_CHECK_MULTIPLIER\"
     " 2>&1)
     
     # Clean up test files
@@ -349,12 +398,165 @@ EOF
     if echo "$output" | grep -q "MALICIOUS_VAR=10"; then 
         echo "Fail: Malicious injection was permitted!"; failed=1; 
     fi
+    if ! echo "$output" | grep -q "CHECK_INTERVAL=30"; then echo "Fail: CLI flag --interval missing/broken or accepted invalid string"; failed=1; fi
+    if ! echo "$output" | grep -q "MAX_LATENCY=250"; then echo "Fail: CLI flag --latency missing/broken or accepted invalid string"; failed=1; fi
+    if ! echo "$output" | grep -q "HEAVY_CHECK_MULTIPLIER=5"; then echo "Fail: CLI flag --heavy-loops missing/broken or accepted invalid string"; failed=1; fi
 
     return $failed
 }
-run_test "Config Parse (Array spaces, Inline comments, Rejects malicious lines)" 0 "test_config_parser"
+run_test "Config Parse (Array spaces, Inline comments, CLI Flag overrides & rejects invalid strings, Rejects malicious lines)" 0 "test_config_parser"
 
-# --- SCENARIO 6: Mock Environment Isolation ---
+# --- SCENARIO 6: Main Daemon Loop Execution ---
+echo -e "\n--- Test: Main Daemon Loop Execution ---"
+
+test_monitor_loop() {
+    # We must test run_monitor_loop, which is an infinite `while true` loop.
+    # To prevent hanging the test suite, we mock `sleep` to exit the subshell after the first iteration!
+    
+    output=$(bash -c "
+        export PATH=\"$MOCK_BIN_DIR:\$PATH\"
+        source \"$RUN_SCRIPT\"
+        
+        # Override the check functions to just echo what they do
+        check_light_ping() {
+            echo \"MOCK_LIGHT_PING_CALLED\"
+            return 0
+        }
+        check_heavy_bandwidth() {
+            echo \"MOCK_HEAVY_BANDWIDTH_CALLED\"
+            return 0
+        }
+        run_failover_protocol() {
+            echo \"MOCK_FAILOVER_CALLED\"
+        }
+        
+        # Override sleep to exit exactly when it hits the end of the first loop iteration
+        sleep() {
+            echo \"MOCK_SLEEP_CALLED\"
+            exit 0
+        }
+        
+        # Start conditions: Heavy check multiplier is 1 so it runs immediately
+        HEAVY_CHECK_MULTIPLIER=1
+        
+        run_monitor_loop
+    " 2>&1)
+    
+    local failed=0
+    # It should have called the light ping
+    if ! echo "$output" | grep -q "MOCK_LIGHT_PING_CALLED"; then echo "Fail: Light ping wasn't called in the main loop."; failed=1; fi
+    
+    # It should have called the heavy bandwidth because multiplier is 1
+    if ! echo "$output" | grep -q "MOCK_HEAVY_BANDWIDTH_CALLED"; then echo "Fail: Heavy bandwidth wasn't called in the main loop."; failed=1; fi
+    
+    # It should have reached the sleep and cleanly exited
+    if ! echo "$output" | grep -q "MOCK_SLEEP_CALLED"; then echo "Fail: The sleep interval wasn't executed or the loop crashed early."; failed=1; fi
+    
+    return $failed
+}
+
+run_test "Main Loop (Executes light ping and heavy bandwidth correctly)" 0 "test_monitor_loop"
+
+test_monitor_loop_sad_path() {
+    output=$(bash -c "
+        export PATH=\"$MOCK_BIN_DIR:\$PATH\"
+        source \"$RUN_SCRIPT\"
+        
+        # Override the check functions to simulate failure
+        check_light_ping() {
+            echo \"MOCK_LIGHT_PING_FAILED\"
+            return 1
+        }
+        check_heavy_bandwidth() {
+            echo \"MOCK_HEAVY_BANDWIDTH_CALLED_ERRONEOUSLY\"
+            return 0
+        }
+        run_failover_protocol() {
+            echo \"MOCK_FAILOVER_CALLED\"
+        }
+        
+        # Override sleep to exit after first loop
+        sleep() {
+            echo \"MOCK_SLEEP_CALLED\"
+            exit 0
+        }
+        
+        HEAVY_CHECK_MULTIPLIER=1
+        
+        run_monitor_loop
+    " 2>&1)
+    
+    local failed=0
+    # Ping should be called and fail
+    if ! echo "$output" | grep -q "MOCK_LIGHT_PING_FAILED"; then echo "Fail: Light ping wasn't called."; failed=1; fi
+    
+    # Heavy bandwidth MUST NOT be called because ping failed
+    if echo "$output" | grep -q "MOCK_HEAVY_BANDWIDTH_CALLED_ERRONEOUSLY"; then echo "Fail: Heavy bandwidth was called despite ping failure."; failed=1; fi
+    
+    # Failover MUST be triggered
+    if ! echo "$output" | grep -q "MOCK_FAILOVER_CALLED"; then echo "Fail: Failover wasn't triggered upon ping failure."; failed=1; fi
+    
+    # Sleep should be executed at the end of the loop
+    if ! echo "$output" | grep -q "MOCK_SLEEP_CALLED"; then echo "Fail: The sleep interval wasn't executed or the loop crashed early."; failed=1; fi
+    
+    return $failed
+}
+
+run_test "Main Loop (Sad Path: Triggers failover and skips bandwidth on ping failure)" 0 "test_monitor_loop_sad_path"
+
+# --- SCENARIO 7: Setup Payload & Initialization ---
+echo -e "\n--- Test: Setup Payload Initialization ---"
+
+test_setup_payload_creation() {
+    # 1. Clean environment
+    rm -f "/dev/shm/net_monitor_up_payload.dat"
+    rm -f "/tmp/net_monitor_up_payload.dat"
+    
+    output=$(bash -c "
+        export PATH=\"$MOCK_BIN_DIR:\$PATH\"
+        source \"$RUN_SCRIPT\"
+        
+        # Mock head to prevent actual 1MB write (bash redirection still creates the empty file lock)
+        echo '#!/bin/bash' > \"$MOCK_BIN_DIR/head\"
+        echo 'exit 0' >> \"$MOCK_BIN_DIR/head\"
+        chmod +x \"$MOCK_BIN_DIR/head\"
+        
+        CHECK_INTERVAL=10
+        HEAVY_CHECK_MULTIPLIER=3
+        
+        setup_payload
+    " 2>&1)
+    
+    local failed=0
+    
+    # Check output strings
+    if ! echo "$output" | grep -q "Starting Robust Network Monitor..."; then echo "Fail: Missing startup string."; failed=1; fi
+    if ! echo "$output" | grep -q "Ping: Every 10s | Bandwidth: Every 30s"; then echo "Fail: Math for bandwidth interval is wrong."; failed=1; fi
+    
+    # Check file creation (prefer /dev/shm if it exists normally, else /tmp)
+    if [ -d "/dev/shm" ]; then
+        if [ ! -f "/dev/shm/net_monitor_up_payload.dat" ]; then
+            echo "Fail: Payload not created in /dev/shm when the dir exists."
+            failed=1
+        fi
+    else
+        if [ ! -f "/tmp/net_monitor_up_payload.dat" ]; then
+            echo "Fail: Payload not created in /tmp fallback."
+            failed=1
+        fi
+    fi
+    
+    # Cleanup
+    rm -f "/dev/shm/net_monitor_up_payload.dat"
+    rm -f "/tmp/net_monitor_up_payload.dat"
+    
+    return $failed
+}
+
+run_test "Payload Setup (Creates file in memory/tmp and prints config)" 0 "test_setup_payload_creation"
+
+
+# --- SCENARIO 8: Mock Environment Isolation ---
 echo -e "\n--- Test: Mock Environment Isolation ---"
 
 test_payload_isolation() {
