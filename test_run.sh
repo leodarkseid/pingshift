@@ -32,6 +32,7 @@ EOF
 cleanup() {
     rm -rf "$MOCK_BIN_DIR"
     rm -f "$SCRIPT_DIR/monitor.conf"
+    rm -f "$SCRIPT_DIR/fake_upload_payload.dat"
     echo -e "\nCleanup complete."
 }
 trap cleanup EXIT

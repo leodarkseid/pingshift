@@ -24,62 +24,66 @@ CONFIG_FILE="$SCRIPT_DIR/monitor.conf"
 # ==========================================
 # 2. PARSE CONFIG & SETUP
 # ==========================================
-# Safe Config Parsing: Read only valid assignments
-if [ -f "$CONFIG_FILE" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-        # Strip inline comments (only if # is preceded by a space or tab)
-        line=$(echo "$line" | sed 's/[ \t]#.*//' | sed 's/[ \t]*$//')
-        
-        # Ignore full comment lines or empty lines
-        [[ -z "${line// }" ]] && continue
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        
-        # Match array assignments (spaces allowed only inside parentheticals)
-        if [[ "$line" =~ ^([A-Z_]+)=\(\s*([a-zA-Z0-9_.:/\"\'[:space:]-]+)\s*\)$ ]]; then
-            eval "${BASH_REMATCH[1]}=(${BASH_REMATCH[2]})"
-        # Match scalar assignments (STRICTLY NO SPACES to prevent eval injection)
-        elif [[ "$line" =~ ^([A-Z_]+)=([a-zA-Z0-9_.:/\"\'-]+)$ ]]; then
-            eval "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
-        fi
-    done < "$CONFIG_FILE"
-fi
+parse_config() {
+    # Safe Config Parsing: Read only valid assignments
+    if [ -f "$CONFIG_FILE" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            # Strip inline comments (only if # is preceded by a space or tab)
+            line=$(echo "$line" | sed 's/[ \t]#.*//' | sed 's/[ \t]*$//')
+            
+            # Ignore full comment lines or empty lines
+            [[ -z "${line// }" ]] && continue
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            
+            # Match array assignments (spaces allowed only inside parentheticals)
+            if [[ "$line" =~ ^([A-Z_]+)=\(\s*([a-zA-Z0-9_.:/\"\'[:space:]-]+)\s*\)$ ]]; then
+                eval "${BASH_REMATCH[1]}=(${BASH_REMATCH[2]})"
+            # Match scalar assignments (STRICTLY NO SPACES to prevent eval injection)
+            elif [[ "$line" =~ ^([A-Z_]+)=([a-zA-Z0-9_.:/\"\'-]+)$ ]]; then
+                eval "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+            fi
+        done < "$CONFIG_FILE"
+    fi
 
-# Command line overrides (safe parsing)
-while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-        --interval)
-            if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then CHECK_INTERVAL="$2"; fi
-            shift
-            ;;
-        --latency)
-            if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then MAX_LATENCY="$2"; fi
-            shift
-            ;;
-        --heavy-loops)
-            if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then HEAVY_CHECK_MULTIPLIER="$2"; fi
-            shift
-            ;;
-        *) ;;
-    esac
-    shift
-done
+    # Command line overrides (safe parsing)
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --interval)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then CHECK_INTERVAL="$2"; fi
+                shift
+                ;;
+            --latency)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then MAX_LATENCY="$2"; fi
+                shift
+                ;;
+            --heavy-loops)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then HEAVY_CHECK_MULTIPLIER="$2"; fi
+                shift
+                ;;
+            *) ;;
+        esac
+        shift
+    done
 
-# Ensure valid defaults if check interval is unset or invalid
-if ! [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [ "$CHECK_INTERVAL" -eq 0 ]; then
-    CHECK_INTERVAL=15
-fi
+    # Ensure valid defaults if check interval is unset or invalid
+    if ! [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [ "$CHECK_INTERVAL" -eq 0 ]; then
+        CHECK_INTERVAL=15
+    fi
+}
 
-# Generate dummy upload payload ONCE to prevent SSD wear and limit false positives
-TMP_UP_FILE="/tmp/net_monitor_up_payload.dat"
-if [ -d "/dev/shm" ]; then
-    TMP_UP_FILE="/dev/shm/net_monitor_up_payload.dat"
-fi
-if [ ! -f "$TMP_UP_FILE" ]; then
-    head -c 1M </dev/urandom > "$TMP_UP_FILE" 2>/dev/null || true
-fi
+setup_payload() {
+    # Generate dummy upload payload ONCE to prevent SSD wear and limit false positives
+    TMP_UP_FILE="/tmp/net_monitor_up_payload.dat"
+    if [ -d "/dev/shm" ]; then
+        TMP_UP_FILE="/dev/shm/net_monitor_up_payload.dat"
+    fi
+    if [ ! -f "$TMP_UP_FILE" ]; then
+        head -c 1M </dev/urandom > "$TMP_UP_FILE" 2>/dev/null || true
+    fi
 
-echo "Starting Robust Network Monitor..."
-echo "Ping: Every ${CHECK_INTERVAL}s | Bandwidth: Every $((CHECK_INTERVAL * HEAVY_CHECK_MULTIPLIER))s"
+    echo "Starting Robust Network Monitor..."
+    echo "Ping: Every ${CHECK_INTERVAL}s | Bandwidth: Every $((CHECK_INTERVAL * HEAVY_CHECK_MULTIPLIER))s"
+}
 
 # ==========================================
 # 3. HELPER: NUMERIC VALIDATION
@@ -161,35 +165,9 @@ check_heavy_bandwidth() {
 }
 
 # ==========================================
-# 5. MAIN MONITORING LOOP
+# 5. FAILOVER CHUNK LOGIC
 # ==========================================
-LOOP_COUNT=1 # Start at 1 to prevent instant heavy check on first launch/after failover
-
-while true; do
-    
-    NETWORK_GOOD=true
-
-    # 1. Always run the light ping check
-    if ! check_light_ping; then
-        NETWORK_GOOD=false
-    fi
-
-    # 2. Run the heavy check only if it's time AND the ping check passed
-    if [ "$NETWORK_GOOD" = true ] && (( LOOP_COUNT % HEAVY_CHECK_MULTIPLIER == 0 )); then
-        if ! check_heavy_bandwidth; then
-            NETWORK_GOOD=false
-        fi
-    fi
-
-    if [ "$NETWORK_GOOD" = true ]; then
-        LOOP_COUNT=$((LOOP_COUNT + 1))
-        sleep "$CHECK_INTERVAL"
-        continue
-    fi
-
-    # IF WE REACH HERE, THE NETWORK IS BAD.
-    # Reset to 1 to prevent immediate bandwidth test upon reconnecting to a new network
-    LOOP_COUNT=1
+run_failover_protocol() {
     echo "Network issue detected! Initiating failover protocol..."
     
     # Get active internet interface via route to avoid picking local-only connections (safely extracting 'dev' column)
@@ -268,6 +246,52 @@ while true; do
             echo -e '\a' 
         fi
     fi
+}
 
-    sleep "$CHECK_INTERVAL"
-done
+# ==========================================
+# 6. MAIN MONITORING LOOP
+# ==========================================
+run_monitor_loop() {
+    LOOP_COUNT=1 # Start at 1 to prevent instant heavy check on first launch/after failover
+
+    while true; do
+        
+        NETWORK_GOOD=true
+
+        # 1. Always run the light ping check
+        if ! check_light_ping; then
+            NETWORK_GOOD=false
+        fi
+
+        # 2. Run the heavy check only if it's time AND the ping check passed
+        if [ "$NETWORK_GOOD" = true ] && (( LOOP_COUNT % HEAVY_CHECK_MULTIPLIER == 0 )); then
+            if ! check_heavy_bandwidth; then
+                NETWORK_GOOD=false
+            fi
+        fi
+
+        if [ "$NETWORK_GOOD" = true ]; then
+            LOOP_COUNT=$((LOOP_COUNT + 1))
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+
+        # IF WE REACH HERE, THE NETWORK IS BAD.
+        # Reset to 1 to prevent immediate bandwidth test upon reconnecting to a new network
+        LOOP_COUNT=1
+        
+        run_failover_protocol
+
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+# ==========================================
+# 7. EXECUTION ENTRY POINT
+# ==========================================
+# Execute only if run directly (not sourced by tests)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    parse_config "$@"
+    setup_payload
+    run_monitor_loop
+fi
