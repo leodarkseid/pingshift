@@ -168,6 +168,9 @@ check_heavy_bandwidth() {
 # 5. FAILOVER CHUNK LOGIC
 # ==========================================
 run_failover_protocol() {
+    # Reset to 1 to prevent immediate bandwidth test upon reconnecting to a new network
+    LOOP_COUNT=1
+    
     echo "Network issue detected! Initiating failover protocol..."
     
     # Get active internet interface via route to avoid picking local-only connections (safely extracting 'dev' column)
@@ -277,9 +280,6 @@ run_monitor_loop() {
         fi
 
         # IF WE REACH HERE, THE NETWORK IS BAD.
-        # Reset to 1 to prevent immediate bandwidth test upon reconnecting to a new network
-        LOOP_COUNT=1
-        
         run_failover_protocol
 
         sleep "$CHECK_INTERVAL"

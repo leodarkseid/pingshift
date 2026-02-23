@@ -46,12 +46,11 @@ create_mock() {
     chmod +x "$MOCK_BIN_DIR/$name"
 }
 
-# Source the functions from run.sh WITHOUT running the infinite loop.
-# We do this by modifying the copy in memory before sourcing it.
-# We also strip the 1MB payload creation to prevent real disk writes during tests.
-sed '/^while true; do/,$d' "$RUN_SCRIPT" | sed 's|head -c 1M.*|true|' > "$SCRIPT_DIR/run_functions_only.sh"
-source "$SCRIPT_DIR/run_functions_only.sh"
-rm -f "$SCRIPT_DIR/run_functions_only.sh"
+# Source the refactored run.sh functions!
+source "$RUN_SCRIPT"
+
+# Initialize global threshold configs natively since test_run.sh now has the functions in memory
+parse_config "$@"
 
 # Create a harmless empty fake payload so the normal bandwidth tests don't permanently skip 'upload' checking
 export TMP_UP_FILE="$SCRIPT_DIR/fake_upload_payload.dat"
@@ -161,12 +160,7 @@ run_test "check_heavy_bandwidth (Missing Upload Payload / Disk Full fallback)" 0
 
 
 # --- SCENARIO 3: Network Visibility & Failover Logic ---
-# To test the failover section without infinite loops, we extract just that chunk.
-sed -n '/# IF WE REACH HERE, THE NETWORK IS BAD./,/sleep "$CHECK_INTERVAL"/p' "$RUN_SCRIPT" | sed '/sleep "$CHECK_INTERVAL"/d' > "$SCRIPT_DIR/failover_chunk.sh"
-
-# Note: run_functions_only.sh was deleted earlier. We must recreate it for this test.
-# We also dynamically strip the 1MB payload creation to prevent disk writes on the actual host during testing.
-sed '/^while true; do/,$d' "$RUN_SCRIPT" | sed 's|head -c 1M.*|true|' > "$SCRIPT_DIR/run_functions_only.sh"
+# The failover logic is now isolated in the `run_failover_protocol` function native to run.sh
 
 echo -e "\n--- Test: Failover Logic (nmcli invisible Wi-Fi skip) ---"
 
@@ -206,7 +200,7 @@ test_hidden_wifi_skip() {
     '
 
     # Run the failover chunk
-    output=$(bash -c "export PATH=\"$MOCK_BIN_DIR:\$PATH\"; source \"$SCRIPT_DIR/run_functions_only.sh\"; source \"$SCRIPT_DIR/failover_chunk.sh\"" 2>&1)
+    output=$(bash -c "export PATH=\"$MOCK_BIN_DIR:\$PATH\"; source \"$RUN_SCRIPT\"; run_failover_protocol" 2>&1)
     
     # We want to ensure it DOES NOT say "Attempting to switch to alternative network: Out_of_range_network"
     
@@ -262,7 +256,7 @@ test_escaped_colon_parsing() {
     '
 
     # Run the failover chunk
-    output=$(bash -c "export PATH=\"$MOCK_BIN_DIR:\$PATH\"; source \"$SCRIPT_DIR/run_functions_only.sh\"; source \"$SCRIPT_DIR/failover_chunk.sh\"" 2>&1)
+    output=$(bash -c "export PATH=\"$MOCK_BIN_DIR:\$PATH\"; source \"$RUN_SCRIPT\"; run_failover_protocol" 2>&1)
     
     if echo "$output" | grep -q "Attempting to switch to alternative network: Hack:My:Wi-Fi"; then
         return 0
@@ -280,10 +274,10 @@ test_loop_reset() {
     # After a failover event triggers, it MUST hit the LOOP_COUNT=1 reset statement
     output=$(bash -c "
         export PATH=\"$MOCK_BIN_DIR:\$PATH\"
-        source \"$SCRIPT_DIR/run_functions_only.sh\"
+        source \"$RUN_SCRIPT\"
         
         LOOP_COUNT=9999
-        source \"$SCRIPT_DIR/failover_chunk.sh\" >/dev/null 2>&1
+        run_failover_protocol >/dev/null 2>&1
         echo \"NEW_LOOP_COUNT=\$LOOP_COUNT\"
     " 2>&1)
     
@@ -296,10 +290,6 @@ test_loop_reset() {
 }
 
 run_test "Failover (Correctly resets LOOP_COUNT to 1 to prevent flapping)" 0 "test_loop_reset"
-
-# Clean up the temp execution files
-rm -f "$SCRIPT_DIR/failover_chunk.sh"
-rm -f "$SCRIPT_DIR/run_functions_only.sh"
 
 # --- SCENARIO 4: Regex Numeric Validation (is_numeric) ---
 echo -e "\n--- Test: Regex Numeric Validation ---"
@@ -333,14 +323,11 @@ VAR_WITH_COMMENT=500     # This is an inline comment
 MALICIOUS_VAR=10; cat /etc/passwd
 EOF
 
-    # 2. Extract just the config parsing logic from run.sh
-    # We replace CONFIG_FILE with our test file mapping
-    sed -n '/# 2. PARSE CONFIG & SETUP/,/^# Command line overrides/p' "$RUN_SCRIPT" | \
-    sed 's|^if \[ -f "$CONFIG_FILE" \]; then|CONFIG_FILE="'"$SCRIPT_DIR"'/monitor_test.conf"; if [ -f "$CONFIG_FILE" ]; then|' > "$SCRIPT_DIR/parse_chunk.sh"
-
-    # 3. Source the parsing block in a clean subshell and evaluate the results
+    # 2. Source the parsing block in a clean subshell and evaluate the results
     output=$(bash -c "
-        source \"$SCRIPT_DIR/parse_chunk.sh\" >/dev/null 2>&1
+        source \"$RUN_SCRIPT\"
+        CONFIG_FILE=\"$SCRIPT_DIR/monitor_test.conf\"
+        parse_config >/dev/null 2>&1
         
         # Output results for the test to grep
         echo \"VALID_VAR=\$VALID_VAR\"
@@ -352,7 +339,6 @@ EOF
     
     # Clean up test files
     rm -f "$SCRIPT_DIR/monitor_test.conf"
-    rm -f "$SCRIPT_DIR/parse_chunk.sh"
 
     # 4. Assertions
     local failed=0
@@ -377,18 +363,14 @@ test_payload_isolation() {
     rm -f "/tmp/net_monitor_up_payload.dat"
     
     # Re-trigger the exact extraction logic we use in the test suite
-    sed '/^while true; do/,$d' "$RUN_SCRIPT" | sed 's|head -c 1M.*|true|' > "$SCRIPT_DIR/run_functions_only_test.sh"
-    
-    # Source it, triggering any global initializations
-    source "$SCRIPT_DIR/run_functions_only_test.sh"
+    # By simply sourcing the file and checking that the initialization doesn't execute
+    source "$RUN_SCRIPT"
     
     # Check if the file was created (if so, our disk write isolation failed)
     local failed=0
     if [ -f "/dev/shm/net_monitor_up_payload.dat" ] || [ -f "/tmp/net_monitor_up_payload.dat" ]; then
         failed=1
     fi
-    
-    rm -f "$SCRIPT_DIR/run_functions_only_test.sh"
     return $failed
 }
 
