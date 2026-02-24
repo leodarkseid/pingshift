@@ -1,0 +1,60 @@
+name: PingShift CI
+
+on: [push, pull_request]
+
+jobs:
+  test-linux-distros:
+    name: Test on ${{ matrix.os-name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false # Let other OSs finish testing even if one fails
+      matrix:
+        include:
+          - os-name: "Ubuntu 24.04"
+            container: "ubuntu:24.04"
+          - os-name: "Ubuntu 22.04"
+            container: "ubuntu:22.04"
+          - os-name: "Debian Bookworm"
+            container: "debian:bookworm-slim"
+          - os-name: "Fedora 40"
+            container: "fedora:40"
+            
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies (Debian & Ubuntu)
+        if: contains(matrix.container, 'ubuntu') || contains(matrix.container, 'debian')
+        # We are root in a container, so no 'sudo' needed
+        run: |
+          apt-get update
+          apt-get install -y network-manager curl iputils-ping iproute2 gawk libnotify-bin
+
+      - name: Install Dependencies (Fedora)
+        if: contains(matrix.container, 'fedora')
+        run: |
+          dnf install -y NetworkManager curl iputils iproute gawk libnotify
+
+      - name: Run Unit Test Suite
+        run: |
+          chmod +x test_run.sh
+          ./test_run.sh
+          
+      - name: Test Installation Script
+        run: |
+          # 1. Create a dummy "systemctl" so we don't need 'sed' hacks
+          mkdir -p /tmp/mock-bin
+          cat << 'EOF' > /tmp/mock-bin/systemctl
+          #!/bin/sh
+          echo "CI Mock: systemctl skipped"
+          exit 0
+          EOF
+          chmod +x /tmp/mock-bin/systemctl
+          
+          # 2. Prepend it to PATH so install.sh finds the mock before anything else
+          export PATH="/tmp/mock-bin:$PATH"
+          
+          # 3. Test the installer!
+          chmod +x install.sh
+          ./install.sh

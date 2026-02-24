@@ -17,7 +17,8 @@ mkdir -p "$MOCK_BIN_DIR"
 export PATH="$MOCK_BIN_DIR:$PATH"
 
 # Setup dummy config
-cat << 'EOF' > "$SCRIPT_DIR/monitor.conf"
+export CONFIG_FILE="$SCRIPT_DIR/monitor_dummy_test.conf"
+cat << 'EOF' > "$CONFIG_FILE"
 CHECK_INTERVAL=1
 HEAVY_CHECK_MULTIPLIER=1
 MAX_LATENCY=150
@@ -31,7 +32,7 @@ EOF
 # Function to clean up mocks
 cleanup() {
     rm -rf "$MOCK_BIN_DIR"
-    rm -f "$SCRIPT_DIR/monitor.conf"
+    rm -f "$SCRIPT_DIR/monitor_dummy_test.conf"
     rm -f "$SCRIPT_DIR/fake_upload_payload.dat"
     echo -e "\nCleanup complete."
 }
@@ -81,6 +82,8 @@ run_test() {
         echo -e "\e[32mPASS\e[0m"
     else
         echo -e "\e[31mFAIL\e[0m (Expected $expected_result, got $actual_result)"
+        echo -e "\n  \e[33m[DEBUG OUTPUT]:\e[0m\n  $(echo "$output" | sed 's/^/  /')\n"
+        echo -e "--- Output for $test_name ---\n$output\n" >> "$TEST_LOG_FILE"
         FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
 }

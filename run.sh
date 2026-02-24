@@ -69,6 +69,20 @@ parse_config() {
     if ! [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [ "$CHECK_INTERVAL" -eq 0 ]; then
         CHECK_INTERVAL=15
     fi
+
+    # Validate that arrays haven't been corrupted by misformatted monitor.conf entries
+    if ! declare -p PING_TARGETS 2>/dev/null | grep -q "^declare -a"; then
+        echo "Error: PING_TARGETS is missing or malformed in monitor.conf (Must be an array: VAR=(\"a\" \"b\"))"
+        exit 1
+    fi
+    if ! declare -p DL_TARGETS 2>/dev/null | grep -q "^declare -a"; then
+        echo "Error: DL_TARGETS is missing or malformed in monitor.conf"
+        exit 1
+    fi
+    if ! declare -p UL_TARGETS 2>/dev/null | grep -q "^declare -a"; then
+        echo "Error: UL_TARGETS is missing or malformed in monitor.conf"
+        exit 1
+    fi
 }
 
 setup_payload() {
@@ -106,8 +120,8 @@ check_light_ping() {
         # If ping failed entirely, try the next target
         if [ $? -ne 0 ]; then continue; fi
         
-        # Extract latency safely, accommodating both iputils and busybox/mac output variations
-        avg_lat=$(echo "$ping_stats" | awk -F'=' '/^(rtt|round-trip)/ {print $2}' | awk -F'/' '{print $2}' | cut -d. -f1)
+        # Extract latency safely: grabs text after '=', strips spaces, splits by '/', takes 2nd item (avg), and strips decimals
+        avg_lat=$(echo "$ping_stats" | awk -F'=' '/^(rtt|round-trip)/ {print $2}' | tr -d ' ' | awk -F'/' '{print $2}' | cut -d. -f1)
         
         # Validate it's a number and check threshold
         if is_numeric "$avg_lat" && [ "$avg_lat" -le "$MAX_LATENCY" ]; then
@@ -126,7 +140,7 @@ check_heavy_bandwidth() {
     dl_passed=false
     for target in "${DL_TARGETS[@]}"; do
         # Fetch up to 2MB to limit total bandwidth waste during test
-        dl_speed=$(curl -s -r 0-2097152 -m 5 -w "%{speed_download}" -o /dev/null "$target" | cut -d. -f1)
+        dl_speed=$((curl -s -r 0-2097152 -m 5 -w "%{speed_download}" -o /dev/null "$target" || echo "0") | cut -d. -f1)
         
         if is_numeric "$dl_speed" && [ "$dl_speed" -ge "$MIN_DL_SPEED" ]; then
             dl_passed=true
@@ -148,7 +162,7 @@ check_heavy_bandwidth() {
     fi
 
     for target in "${UL_TARGETS[@]}"; do
-        ul_speed=$(curl -s -m 5 -w "%{speed_upload}" -o /dev/null -F "file=@${TMP_UP_FILE}" "$target" | cut -d. -f1)
+        ul_speed=$((curl -s -m 5 -w "%{speed_upload}" -o /dev/null -F "file=@${TMP_UP_FILE}" "$target" || echo "0") | cut -d. -f1)
         
         if is_numeric "$ul_speed" && [ "$ul_speed" -ge "$MIN_UL_SPEED" ]; then
             ul_passed=true
@@ -175,9 +189,12 @@ run_failover_protocol() {
     
     # Get active internet interface via route to avoid picking local-only connections (safely extracting 'dev' column)
     ACTIVE_IFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+    
     if [ -n "$ACTIVE_IFACE" ]; then
         CURRENT_UUID=$(nmcli -g UUID,DEVICE connection show --active | grep ":$ACTIVE_IFACE$" | cut -d: -f1 | head -n 1)
     else
+        # If ip route get 8.8.8.8 fails (e.g., no default route completely), fallback to just grabbing the first active non-loopback profile
+        echo "Warning: No route to 8.8.8.8 found. Falling back to any active wireless/ethernet profile."
         CURRENT_UUID=$(nmcli -g UUID,TYPE connection show --active | grep -E ':(802-11-wireless|802-3-ethernet)$' | cut -d: -f1 | head -n 1)
     fi
     
