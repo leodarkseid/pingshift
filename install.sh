@@ -12,6 +12,7 @@ if [ "$EUID" -eq 0 ] && [ "$PINGSHIFT_CI" != "1" ]; then
     exit 1
 fi
 
+
 echo "Provisioning Network Monitor..."
 
 
