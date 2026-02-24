@@ -173,6 +173,7 @@ test_hidden_wifi_skip() {
     create_mock "notify-send" "exit 0"
     create_mock "paplay" "exit 0"
     create_mock "ping" "exit 1"
+    create_mock "sleep" "exit 0"
 
     # Mock nmcli: 
     # - We are on "BadCurrentNet"
@@ -180,22 +181,27 @@ test_hidden_wifi_skip() {
     # - BUT "Out_of_range_network" does NOT appear in `device wifi list`
     create_mock "nmcli" '
         arg_str="$*"
-        if [[ "$arg_str" == *"--active"* ]]; then
+        if [[ "$arg_str" == *"device disconnect"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"device wifi rescan"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"--active"* ]]; then
             echo "uuid-current-1234:wlan0"
             exit 0
         elif [[ "$arg_str" == *"device wifi list"* ]]; then
-            # Visible Networks List (Out of range network is NOT here)
             echo "Someone_elses_wifi"
+            exit 0
+        elif [[ "$arg_str" == *"connection.timestamp"* ]]; then
+            echo "1700000000"
             exit 0
         elif [[ "$arg_str" == *"802-11-wireless.ssid"* ]]; then
             echo "Out_of_range_network"
             exit 0
         elif [[ "$arg_str" == *"show"* && "$arg_str" != *"--active"* ]]; then
-            echo "uuid-current-1234:BadCurrentNet:802-11-wireless"
-            echo "uuid-missing-5678:Out_of_range_network:802-11-wireless"
+            echo "uuid-current-1234:802-11-wireless:BadCurrentNet"
+            echo "uuid-missing-5678:802-11-wireless:Out_of_range_network"
             exit 0
         elif [[ "$arg_str" == *"up uuid"* ]]; then
-            # If the script calls this on the missing network, it FAILED the visibility skip test
             echo "TEST_FAILED_ATTEMPTED_CONNECTION"
             exit 0
         fi
@@ -228,6 +234,7 @@ test_escaped_colon_parsing() {
     create_mock "notify-send" "exit 0"
     create_mock "paplay" "exit 0"
     create_mock "ping" "exit 1"
+    create_mock "sleep" "exit 0"
 
     # Mock nmcli: 
     # - We are on "BadCurrentNet"
@@ -235,11 +242,18 @@ test_escaped_colon_parsing() {
     # - It is visible
     create_mock "nmcli" '
         arg_str="$*"
-        if [[ "$arg_str" == *"--active"* ]]; then
+        if [[ "$arg_str" == *"device disconnect"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"device wifi rescan"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"--active"* ]]; then
             echo "uuid-current-1234:wlan0"
             exit 0
         elif [[ "$arg_str" == *"device wifi list"* ]]; then
             echo "Hack:My:Wi-Fi"
+            exit 0
+        elif [[ "$arg_str" == *"connection.timestamp"* ]]; then
+            echo "1700000000"
             exit 0
         elif [[ "$arg_str" == *"802-11-wireless.ssid"* ]]; then
             echo "Hack:My:Wi-Fi"
@@ -278,17 +292,27 @@ test_failover_fallback() {
     create_mock "notify-send" "exit 0"
     create_mock "paplay" "exit 0"
     create_mock "ping" "exit 1"
+    create_mock "sleep" "exit 0"
 
     # Mock nmcli: 
     # Current UUID should be fetched via the fallback type-based grep instead of DEVICE.
     create_mock "nmcli" '
         arg_str="$*"
-        if [[ "$arg_str" == *"--active"* ]]; then
-            # The script will run: nmcli -g UUID,TYPE connection show --active | grep -E ":(802-11-wireless|802-3-ethernet)$"
+        if [[ "$arg_str" == *"device disconnect"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"device wifi rescan"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"device status"* ]]; then
+            echo "wlan0:wifi"
+            exit 0
+        elif [[ "$arg_str" == *"--active"* ]]; then
             echo "uuid-fallback-1234:802-11-wireless"
             exit 0
         elif [[ "$arg_str" == *"device wifi list"* ]]; then
             echo "BackupNet"
+            exit 0
+        elif [[ "$arg_str" == *"connection.timestamp"* ]]; then
+            echo "1700000000"
             exit 0
         elif [[ "$arg_str" == *"802-11-wireless.ssid"* ]]; then
             echo "BackupNet"
@@ -321,6 +345,7 @@ test_loop_reset() {
     # 3. Test loop counter logic reset
     # Start loop count high to simulate the script has been running for days
     # After a failover event triggers, it MUST hit the LOOP_COUNT=1 reset statement
+    create_mock "sleep" "exit 0"
     output=$(bash -c "
         export PATH=\"$MOCK_BIN_DIR:\$PATH\"
         source \"$RUN_SCRIPT\"
@@ -340,7 +365,215 @@ test_loop_reset() {
 
 run_test "Failover (Correctly resets LOOP_COUNT to 1 to prevent flapping)" 0 "test_loop_reset"
 
-# --- SCENARIO 4: Regex Numeric Validation (is_numeric) ---
+
+test_disconnect_before_switch() {
+    # Validates that the script disconnects the adapter BEFORE attempting connection up.
+    # The mock logs the order of operations to a temp file.
+    local ORDER_LOG="/tmp/nmcli_order_test_$$"
+    rm -f "$ORDER_LOG"
+
+    create_mock "ip" "echo '8.8.8.8 via 192.168.1.1 dev wlan0 proto dhcp src 192.168.1.100 metric 600'; exit 0"
+    create_mock "notify-send" "exit 0"
+    create_mock "paplay" "exit 0"
+    create_mock "ping" "exit 1"
+    create_mock "sleep" "exit 0"
+
+    create_mock "nmcli" '
+        arg_str="$*"
+        ORDER_LOG="'"$ORDER_LOG"'"
+        if [[ "$arg_str" == *"device disconnect"* ]]; then
+            echo "DISCONNECT" >> "$ORDER_LOG"
+            exit 0
+        elif [[ "$arg_str" == *"device wifi rescan"* ]]; then
+            echo "RESCAN" >> "$ORDER_LOG"
+            exit 0
+        elif [[ "$arg_str" == *"--active"* ]]; then
+            echo "uuid-current-1234:wlan0"
+            exit 0
+        elif [[ "$arg_str" == *"device wifi list"* ]]; then
+            echo "BackupNet"
+            exit 0
+        elif [[ "$arg_str" == *"connection.timestamp"* ]]; then
+            echo "1700000000"
+            exit 0
+        elif [[ "$arg_str" == *"802-11-wireless.ssid"* ]]; then
+            echo "BackupNet"
+            exit 0
+        elif [[ "$arg_str" == *"show"* && "$arg_str" != *"--active"* ]]; then
+            echo "uuid-current-1234:802-11-wireless:BadCurrentNet"
+            echo "uuid-backup-5678:802-11-wireless:BackupNet"
+            exit 0
+        elif [[ "$arg_str" == *"up uuid"* ]]; then
+            echo "CONNECT_UP" >> "$ORDER_LOG"
+            exit 0
+        fi
+        exit 1
+    '
+
+    # Run the failover
+    bash -c "export PATH=\"$MOCK_BIN_DIR:\$PATH\"; source \"$RUN_SCRIPT\"; run_failover_protocol" >/dev/null 2>&1
+
+    # Verify order: DISCONNECT must appear before CONNECT_UP
+    local failed=0
+    if [ ! -f "$ORDER_LOG" ]; then
+        echo "Fail: No operations were logged."
+        failed=1
+    else
+        local first_disconnect=$(grep -n "DISCONNECT" "$ORDER_LOG" | head -n1 | cut -d: -f1)
+        local first_connect=$(grep -n "CONNECT_UP" "$ORDER_LOG" | head -n1 | cut -d: -f1)
+        local has_rescan=$(grep -c "RESCAN" "$ORDER_LOG")
+
+        if [ -z "$first_disconnect" ]; then
+            echo "Fail: DISCONNECT was never called."
+            failed=1
+        elif [ -z "$first_connect" ]; then
+            echo "Fail: CONNECT_UP was never called."
+            failed=1
+        elif [ "$first_disconnect" -ge "$first_connect" ]; then
+            echo "Fail: DISCONNECT happened after CONNECT_UP (wrong order)."
+            failed=1
+        fi
+
+        if [ "$has_rescan" -eq 0 ]; then
+            echo "Fail: RESCAN was never called."
+            failed=1
+        fi
+    fi
+
+    rm -f "$ORDER_LOG"
+    return $failed
+}
+
+run_test "Failover (Disconnects adapter before switching to new network)" 0 "test_disconnect_before_switch"
+
+
+test_skip_never_connected() {
+    # Validates that connections with timestamp=0 (never connected) are skipped.
+    create_mock "ip" "echo '8.8.8.8 via 192.168.1.1 dev wlan0 proto dhcp src 192.168.1.100 metric 600'; exit 0"
+    create_mock "notify-send" "exit 0"
+    create_mock "paplay" "exit 0"
+    create_mock "ping" "exit 1"
+    create_mock "sleep" "exit 0"
+
+    create_mock "nmcli" '
+        arg_str="$*"
+        if [[ "$arg_str" == *"device disconnect"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"device wifi rescan"* ]]; then
+            exit 0
+        elif [[ "$arg_str" == *"--active"* ]]; then
+            echo "uuid-current-1234:wlan0"
+            exit 0
+        elif [[ "$arg_str" == *"device wifi list"* ]]; then
+            echo "NeverUsedNet"
+            echo "PreviouslyUsedNet"
+            exit 0
+        elif [[ "$arg_str" == *"connection.timestamp"* ]]; then
+            # NeverUsedNet has timestamp=0, PreviouslyUsedNet has a real timestamp
+            if [[ "$arg_str" == *"uuid-never-1111"* ]]; then
+                echo "0"
+            else
+                echo "1700000000"
+            fi
+            exit 0
+        elif [[ "$arg_str" == *"802-11-wireless.ssid"* ]]; then
+            if [[ "$arg_str" == *"uuid-never-1111"* ]]; then
+                echo "NeverUsedNet"
+            else
+                echo "PreviouslyUsedNet"
+            fi
+            exit 0
+        elif [[ "$arg_str" == *"show"* && "$arg_str" != *"--active"* ]]; then
+            echo "uuid-current-1234:802-11-wireless:CurrentNet"
+            echo "uuid-never-1111:802-11-wireless:NeverUsedNet"
+            echo "uuid-used-2222:802-11-wireless:PreviouslyUsedNet"
+            exit 0
+        elif [[ "$arg_str" == *"up uuid"* ]]; then
+            exit 0
+        fi
+        exit 1
+    '
+
+    output=$(bash -c "export PATH=\"$MOCK_BIN_DIR:\$PATH\"; source \"$RUN_SCRIPT\"; run_failover_protocol" 2>&1)
+
+    local failed=0
+    # Should NOT attempt NeverUsedNet
+    if echo "$output" | grep -q "NeverUsedNet"; then
+        echo "Fail: Script attempted to connect to a never-connected network."
+        failed=1
+    fi
+    # SHOULD attempt PreviouslyUsedNet
+    if ! echo "$output" | grep -q "PreviouslyUsedNet"; then
+        echo "Fail: Script did not attempt the previously-connected network."
+        failed=1
+    fi
+    return $failed
+}
+
+run_test "Skip Never-Connected Networks (Filters by connection.timestamp)" 0 "test_skip_never_connected"
+
+# --- SCENARIO 4.5: Notification Toggle ---
+echo -e "\n--- Test: Notification Toggle (ENABLE_NOTIFICATIONS) ---"
+
+test_notifications_disabled() {
+    # When ENABLE_NOTIFICATIONS=false, send_alert should NOT call notify-send or zenity
+    create_mock "notify-send" 'echo "NOTIFY_SEND_WAS_CALLED"; exit 0'
+    create_mock "zenity" 'echo "ZENITY_WAS_CALLED"; exit 0'
+
+    output=$(bash -c "
+        source \"$RUN_SCRIPT\"
+        ENABLE_NOTIFICATIONS=false
+        send_alert 'Test Title' 'Test Message' 'critical'
+    " 2>&1)
+
+    local failed=0
+    # Should still log to stdout
+    if ! echo "$output" | grep -q "\[Alert/critical\] Test Title: Test Message"; then
+        echo "Fail: Alert was not logged to stdout."
+        failed=1
+    fi
+    # Should NOT call notify-send or zenity
+    if echo "$output" | grep -q "NOTIFY_SEND_WAS_CALLED"; then
+        echo "Fail: notify-send was called despite ENABLE_NOTIFICATIONS=false."
+        failed=1
+    fi
+    if echo "$output" | grep -q "ZENITY_WAS_CALLED"; then
+        echo "Fail: zenity was called despite ENABLE_NOTIFICATIONS=false."
+        failed=1
+    fi
+    return $failed
+}
+
+run_test "Notifications Disabled (Suppresses notify-send/zenity, still logs)" 0 "test_notifications_disabled"
+
+test_notifications_enabled() {
+    # When ENABLE_NOTIFICATIONS=true, send_alert SHOULD call notify-send
+    create_mock "notify-send" 'echo "NOTIFY_SEND_WAS_CALLED"; exit 0'
+
+    output=$(bash -c "
+        export PATH=\"$MOCK_BIN_DIR:\$PATH\"
+        source \"$RUN_SCRIPT\"
+        ENABLE_NOTIFICATIONS=true
+        send_alert 'Test Title' 'Test Message' 'normal'
+    " 2>&1)
+
+    local failed=0
+    # Should log to stdout
+    if ! echo "$output" | grep -q "\[Alert/normal\] Test Title: Test Message"; then
+        echo "Fail: Alert was not logged to stdout."
+        failed=1
+    fi
+    # SHOULD call notify-send
+    if ! echo "$output" | grep -q "NOTIFY_SEND_WAS_CALLED"; then
+        echo "Fail: notify-send was NOT called despite ENABLE_NOTIFICATIONS=true."
+        failed=1
+    fi
+    return $failed
+}
+
+run_test "Notifications Enabled (Fires notify-send and logs)" 0 "test_notifications_enabled"
+
+# --- SCENARIO 5: Regex Numeric Validation (is_numeric) ---
 echo -e "\n--- Test: Regex Numeric Validation ---"
 
 # Mock ping to return alphabetic characters where the number should be

@@ -76,6 +76,28 @@ When run this way, the monitor will stay active in your foreground terminal sess
 
 By default, PingShift utilizes reliable, safe thresholds predefined within `monitor.conf`. Standard behaviors can also be manually injected through Command Line Flags.
 
+### Updating Configuration
+
+To customize PingShift, open `monitor.conf` in any text editor:
+
+```bash
+nano monitor.conf
+```
+
+Edit the desired values, save the file, then **restart PingShift** for changes to take effect:
+
+*   **If running as a service:**
+    ```bash
+    systemctl --user restart pingshift.service
+    ```
+*   **If running standalone in a terminal:**
+    Stop the script with `Ctrl + C` and re-launch it:
+    ```bash
+    ./run.sh
+    ```
+
+> **Note:** Configuration is read once at startup. Changes to `monitor.conf` are **not** picked up automatically — a restart is always required.
+
 ### Timing & Loop Thresholds
 *   `CHECK_INTERVAL=15` — The wait interval (in seconds) between "Light Ping" tests.
 *   `HEAVY_CHECK_MULTIPLIER=20` — Decides how many loops PingShift waits before launching the aggressive "Heavy" `curl` upload/download tests against standard targets. Defaults to doing this every `15s * 20 loops (300 seconds; or 5 minutes)`.
@@ -90,6 +112,9 @@ It is strongly recommended to use standard, reliable DNS domains natively inject
 *   `PING_TARGETS={"1.1.1.1" "8.8.8.8" "9.9.9.9"}`
 *   `DL_TARGETS={"http://speedtest.tele2.net/1MB.zip" "https://proof.ovh.net/files/1Mb.dat"}`
 *   `UL_TARGETS={"https://httpbin.org/post" "https://ptsv2.com/t/netmon/post"}`
+
+### Notifications
+*   `ENABLE_NOTIFICATIONS=true` — Controls desktop notifications (`notify-send`/`zenity`) and audio alarms (`paplay`). Set to `false` to suppress all visual/audio alerts; events are still printed to stdout. Useful for headless servers or scripted environments.
 
 ### Command Line Interjection
 Invoking `./run.sh` directly allows one-off parameter overrides:

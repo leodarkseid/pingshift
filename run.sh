@@ -13,6 +13,7 @@ HEAVY_CHECK_MULTIPLIER=20       # Run heavy test every 20 loops (15s * 20 = 300s
 MAX_LATENCY=150
 MIN_DL_SPEED=1000000 
 MIN_UL_SPEED=500000
+ENABLE_NOTIFICATIONS=true
 
 # Redundant Endpoints to prevent Single Points of Failure
 PING_TARGETS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
@@ -129,6 +130,14 @@ send_alert() {
     local message="$2"
     local urgency="${3:-normal}"
 
+    # Always log to stdout
+    echo "[Alert/$urgency] $title: $message"
+
+    # Desktop notifications are gated behind ENABLE_NOTIFICATIONS
+    if [ "$ENABLE_NOTIFICATIONS" != "true" ]; then
+        return 0
+    fi
+
     if command -v notify-send >/dev/null 2>&1; then
         notify-send "$title" "$message" -u "$urgency"
     elif command -v zenity >/dev/null 2>&1; then
@@ -137,8 +146,6 @@ send_alert() {
         else
             zenity --info --title="$title" --text="$message" 2>/dev/null &
         fi
-    else
-        echo "[$urgency] $title: $message"
     fi
 }
 
@@ -231,8 +238,24 @@ run_failover_protocol() {
         # If ip route get 8.8.8.8 fails (e.g., no default route completely), fallback to just grabbing the first active non-loopback profile
         echo "Warning: No route to 8.8.8.8 found. Falling back to any active wireless/ethernet profile."
         CURRENT_UUID=$(nmcli -g UUID,TYPE connection show --active | grep -E ':(802-11-wireless|802-3-ethernet)$' | cut -d: -f1 | head -n 1)
+        # Also detect the wireless interface name so we can disconnect it
+        ACTIVE_IFACE=$(nmcli -g DEVICE,TYPE device status | grep ':wifi$' | cut -d: -f1 | head -n 1)
     fi
     
+    # Disconnect the current (broken) connection to free the Wi-Fi adapter.
+    # Without this, nmcli connection up for a different profile often fails because
+    # the adapter is still associated with the dead connection. The GUI network
+    # manager handles this implicitly — the script must do it explicitly.
+    if [ -n "$ACTIVE_IFACE" ]; then
+        echo "Releasing adapter $ACTIVE_IFACE from current connection..."
+        nmcli device disconnect "$ACTIVE_IFACE" 2>/dev/null || true
+        sleep 2
+    fi
+
+    # Force a fresh Wi-Fi scan so visibility check uses current data, not stale cache
+    nmcli device wifi rescan 2>/dev/null || true
+    sleep 2
+
     # Get a list of currently visible SSIDs for Wi-Fi to avoid hanging on out-of-range networks
     mapfile -t VISIBLE_SSIDS < <(nmcli -g SSID device wifi list 2>/dev/null | grep -v '^$')
     
@@ -249,6 +272,13 @@ run_failover_protocol() {
         conn_name=$(echo "$entry" | cut -d: -f3-)
 
         if [ -z "$conn_uuid" ] || [ "$conn_uuid" = "$CURRENT_UUID" ]; then
+            continue
+        fi
+
+        # Skip connections that have NEVER been successfully activated.
+        # timestamp=0 means no stored credentials — attempting these triggers password dialogs.
+        conn_timestamp=$(nmcli -g connection.timestamp connection show uuid "$conn_uuid" 2>/dev/null)
+        if [ "$conn_timestamp" = "0" ] || [ -z "$conn_timestamp" ]; then
             continue
         fi
 
@@ -274,7 +304,7 @@ run_failover_protocol() {
 
         echo "Attempting to switch to alternative network: $conn_name..."
         
-        if nmcli connection up uuid "$conn_uuid" --wait 15 >/dev/null 2>&1; then
+        if nmcli --wait 15 connection up uuid "$conn_uuid" >/dev/null 2>&1; then
             echo "Connected to $conn_name. Testing connection quality..."
             
             if check_light_ping; then
@@ -297,10 +327,12 @@ run_failover_protocol() {
         send_alert "CRITICAL NETWORK FAILURE" "No usable internet available on any network." "critical"
         CRITICAL_FAILURE_ACTIVE=true
         
-        if command -v paplay >/dev/null 2>&1; then
-            paplay /usr/share/sounds/freedesktop/stereo/dialog-warning.oga
-        else
-            echo -e '\a' 
+        if [ "$ENABLE_NOTIFICATIONS" = "true" ]; then
+            if command -v paplay >/dev/null 2>&1; then
+                paplay /usr/share/sounds/freedesktop/stereo/dialog-warning.oga
+            else
+                echo -e '\a' 
+            fi
         fi
     fi
 }
