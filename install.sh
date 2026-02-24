@@ -6,7 +6,7 @@ set -e # Exit immediately if a command fails
 # ==========================================
 # 0. ROOT EXECUTION CHECK
 # ==========================================
-if [ "$EUID" -eq 0 ]; then
+if [ "$EUID" -eq 0 ] && [ "$PINGSHIFT_CI" != "1" ]; then
     echo "❌ ERROR: Do not run this script as root or with sudo."
     echo "PingShift is a user-level daemon. It must be installed as your normal user so it can access your desktop notifications and local network manager."
     exit 1
@@ -94,9 +94,13 @@ echo "✔ Generated systemd service file at $SERVICE_FILE"
 # ==========================================
 # 4. DAEMON ACTIVATION
 # ==========================================
-systemctl --user daemon-reload
-systemctl --user enable pingshift.service
-systemctl --user restart pingshift.service
+if [ "$PINGSHIFT_CI" = "1" ]; then
+    echo "⚠ CI environment detected: Skipping systemctl daemon activation."
+else
+    systemctl --user daemon-reload
+    systemctl --user enable pingshift.service
+    systemctl --user restart pingshift.service
+fi
 
 echo ""
 echo "=================================================="

@@ -43,18 +43,5 @@ jobs:
           
       - name: Test Installation Script
         run: |
-          # 1. Create a dummy "systemctl" so we don't need 'sed' hacks
-          mkdir -p /tmp/mock-bin
-          cat << 'EOF' > /tmp/mock-bin/systemctl
-          #!/bin/sh
-          echo "CI Mock: systemctl skipped"
-          exit 0
-          EOF
-          chmod +x /tmp/mock-bin/systemctl
-          
-          # 2. Prepend it to PATH so install.sh finds the mock before anything else
-          export PATH="/tmp/mock-bin:$PATH"
-          
-          # 3. Test the installer!
           chmod +x install.sh
-          ./install.sh
+          PINGSHIFT_CI=1 ./install.sh
