@@ -87,7 +87,7 @@ parse_config() {
 
 setup_payload() {
     # 1. DEPENDENCY VERIFICATION
-    local required_cmds=("ping" "curl" "nmcli" "ip" "awk" "notify-send")
+    local required_cmds=("ping" "curl" "nmcli" "ip" "awk")
     local missing_deps=0
 
     for cmd in "${required_cmds[@]}"; do
@@ -117,11 +117,29 @@ setup_payload() {
 }
 
 # ==========================================
-# 3. HELPER: NUMERIC VALIDATION
+# 3. HELPER: NUMERIC VALIDATION & ALERTS
 # ==========================================
 is_numeric() {
     # Returns 0 (true) if the input is a valid positive integer, 1 (false) otherwise
     [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+send_alert() {
+    local title="$1"
+    local message="$2"
+    local urgency="${3:-normal}"
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "$title" "$message" -u "$urgency"
+    elif command -v zenity >/dev/null 2>&1; then
+        if [ "$urgency" = "critical" ]; then
+            zenity --error --title="$title" --text="$message" 2>/dev/null &
+        else
+            zenity --info --title="$title" --text="$message" 2>/dev/null &
+        fi
+    else
+        echo "[$urgency] $title: $message"
+    fi
 }
 
 # ==========================================
@@ -157,7 +175,7 @@ check_heavy_bandwidth() {
     dl_passed=false
     for target in "${DL_TARGETS[@]}"; do
         # Fetch up to 2MB to limit total bandwidth waste during test
-        dl_speed=$((curl -s -r 0-2097152 -m 5 -w "%{speed_download}" -o /dev/null "$target" || echo "0") | cut -d. -f1)
+        dl_speed=$( (curl -s -r 0-2097152 -m 5 -w "%{speed_download}" -o /dev/null "$target" || echo "0") | cut -d. -f1 )
         
         if is_numeric "$dl_speed" && [ "$dl_speed" -ge "$MIN_DL_SPEED" ]; then
             dl_passed=true
@@ -179,7 +197,7 @@ check_heavy_bandwidth() {
     fi
 
     for target in "${UL_TARGETS[@]}"; do
-        ul_speed=$((curl -s -m 5 -w "%{speed_upload}" -o /dev/null -F "file=@${TMP_UP_FILE}" "$target" || echo "0") | cut -d. -f1)
+        ul_speed=$( (curl -s -m 5 -w "%{speed_upload}" -o /dev/null -F "file=@${TMP_UP_FILE}" "$target" || echo "0") | cut -d. -f1 )
         
         if is_numeric "$ul_speed" && [ "$ul_speed" -ge "$MIN_UL_SPEED" ]; then
             ul_passed=true
@@ -261,8 +279,9 @@ run_failover_protocol() {
             
             if check_light_ping; then
                 echo "Quality confirmed on $conn_name! Resuming normal monitoring."
-                notify-send "Network Restored" "Switched to: $conn_name" -u normal
+                send_alert "Network Restored" "Switched to: $conn_name" "normal"
                 INTERNET_RESTORED=true
+                CRITICAL_FAILURE_ACTIVE=false
                 break 
             else
                 echo "$conn_name connected locally, but failed quality checks."
@@ -275,7 +294,8 @@ run_failover_protocol() {
     # IF ALL ALTERNATIVES FAIL, RAISE ALARM
     if [ "$INTERNET_RESTORED" = false ]; then
         echo "All available connections exhausted or degraded! Raising alarm..."
-        notify-send "CRITICAL NETWORK FAILURE" "No usable internet available on any network." -u critical
+        send_alert "CRITICAL NETWORK FAILURE" "No usable internet available on any network." "critical"
+        CRITICAL_FAILURE_ACTIVE=true
         
         if command -v paplay >/dev/null 2>&1; then
             paplay /usr/share/sounds/freedesktop/stereo/dialog-warning.oga
@@ -290,6 +310,7 @@ run_failover_protocol() {
 # ==========================================
 run_monitor_loop() {
     LOOP_COUNT=1 # Start at 1 to prevent instant heavy check on first launch/after failover
+    CRITICAL_FAILURE_ACTIVE=false
 
     while true; do
         
@@ -308,6 +329,21 @@ run_monitor_loop() {
         fi
 
         if [ "$NETWORK_GOOD" = true ]; then
+            if [ "$CRITICAL_FAILURE_ACTIVE" = true ]; then
+                ACTIVE_IFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+                CURRENT_CONN="Unknown Network"
+                if [ -n "$ACTIVE_IFACE" ]; then
+                    CURRENT_UUID=$(nmcli -g UUID,DEVICE connection show --active | grep ":$ACTIVE_IFACE$" | cut -d: -f1 | head -n 1)
+                    if [ -n "$CURRENT_UUID" ]; then
+                        CURRENT_CONN=$(nmcli -g connection.id connection show uuid "$CURRENT_UUID" 2>/dev/null)
+                        [ -z "$CURRENT_CONN" ] && CURRENT_CONN="Unknown Network"
+                    fi
+                fi
+                echo "Network recovered automatically! Connected to: ${CURRENT_CONN}. Resuming normal monitoring."
+                send_alert "Network Restored" "Automatically recovered: ${CURRENT_CONN}" "normal"
+                CRITICAL_FAILURE_ACTIVE=false
+            fi
+            
             LOOP_COUNT=$((LOOP_COUNT + 1))
             sleep "$CHECK_INTERVAL"
             continue
