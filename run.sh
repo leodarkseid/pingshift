@@ -86,6 +86,23 @@ parse_config() {
 }
 
 setup_payload() {
+    # 1. DEPENDENCY VERIFICATION
+    local required_cmds=("ping" "curl" "nmcli" "ip" "awk" "notify-send")
+    local missing_deps=0
+
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo "Error: Missing critical dependency: $cmd" >&2
+            missing_deps=1
+        fi
+    done
+
+    if [ "$missing_deps" -eq 1 ]; then
+        echo "Exiting: Please install missing dependencies to run PingShift." >&2
+        exit 1
+    fi
+
+    # 2. GENERATE UPLOAD PAYLOAD
     # Generate dummy upload payload ONCE to prevent SSD wear and limit false positives
     TMP_UP_FILE="/tmp/net_monitor_up_payload.dat"
     if [ -d "/dev/shm" ]; then
