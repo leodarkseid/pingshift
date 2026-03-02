@@ -2,6 +2,8 @@
 
 PingShift is a **user-level, customizable network monitoring bash script** designed to silently observe your internet connection's health and dynamically swap to alternative known wireless or wired connections upon severe degradation or complete failure.
 
+This is motivated by simple use case where constant real world connectivity is important it can help reduce downtime from bad network, and switch to backup connections automatically
+
 It utilizes robust bash-native processing tools including `nmcli`, `iproute2`, and `curl`, coupled with a fail-safe fallback using `systemd` user services, `notify-send`, and desktop audio.
 
 ---
